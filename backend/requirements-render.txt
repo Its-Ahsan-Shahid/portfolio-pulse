@@ -1,0 +1,12 @@
+# Portfolio Pulse — lean requirements for Render free tier (512MB RAM).
+# Heavy ML deps (chromadb, sentence-transformers/torch, spacy) are omitted on
+# purpose: embeddings_store.py falls back to sklearn TF-IDF, and preprocess.py
+# falls back to regex-based entity matching when spaCy is absent.
+# The full-stack requirements.txt remains for local/Docker use with the ML stack.
+fastapi>=0.115,<1
+uvicorn[standard]>=0.30,<1
+pydantic>=2.7,<3
+requests>=2.31,<3
+openai>=1.40,<2
+scikit-learn>=1.5,<2
+numpy>=1.26,<3

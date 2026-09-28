@@ -1,0 +1,21 @@
+# Render Blueprint for Portfolio Pulse (free tier).
+# Deploy via: Render Dashboard -> New -> Blueprint -> select this repo.
+# Secrets (GROQ_API_KEY, FINNHUB_API_KEY, ALPHA_VANTAGE_API_KEY) are set in the
+# Render dashboard after deploy; they are never committed to the repo.
+services:
+  - type: web
+    name: portfolio-pulse
+    runtime: docker
+    dockerfilePath: ./Dockerfile.render
+    plan: free
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      - key: GROQ_API_KEY
+        sync: false
+      - key: FINNHUB_API_KEY
+        sync: false
+      - key: ALPHA_VANTAGE_API_KEY
+        sync: false
+      - key: DATA_DIR
+        value: /tmp/portfolio-pulse-data
