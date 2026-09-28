@@ -353,9 +353,20 @@ def score_article(
         sentiment_label=sentiment_label(float(s_score)),
         recency=round(recency, 3),
         materiality=round(materiality, 3),
-        priority=age_days < priority_days,
+        priority=False,  # assigned by preprocess() from the latest-N-dates set
         age_days=age_days,
     )
+
+
+def priority_dates_for(scored: list[ScoredArticle], n: int) -> set:
+    """The latest *n* distinct calendar dates (UTC) across scored articles.
+
+    Priority is a date-set membership test, not an elapsed-days window: this
+    guarantees exactly the five latest calendar dates are prioritized, never
+    a partial sixth day.
+    """
+    dates = sorted({s.article.published_at.date() for s in scored}, reverse=True)
+    return set(dates[:n])
 
 
 def preprocess(
@@ -371,6 +382,11 @@ def preprocess(
     now = datetime.now(timezone.utc)
     scored = [score_article(a, ticker, company_name, days, priority_days, now) for a in articles]
     relevant = [s for s in scored if s.relevance >= relevance_threshold]
+    # Priority = membership in the latest `priority_days` distinct calendar
+    # dates among relevant articles (exactly N dates, never a partial extra).
+    top_dates = priority_dates_for(relevant, priority_days)
+    for s in relevant:
+        s.priority = s.article.published_at.date() in top_dates
     material = sorted(
         [s for s in relevant if s.materiality >= materiality_threshold],
         key=lambda s: s.materiality,

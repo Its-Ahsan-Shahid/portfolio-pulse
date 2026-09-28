@@ -1,0 +1,11 @@
+# Portfolio Pulse — production requirements (Vercel serverless + local Docker).
+# Lean by design: no chromadb / torch / spacy. embeddings_store.py falls back
+# to sklearn TF-IDF and preprocess.py falls back to regex entity matching.
+# Fits Vercel's Python function bundle with wide margin.
+fastapi>=0.115,<1
+uvicorn[standard]>=0.30,<1
+pydantic>=2.7,<3
+requests>=2.31,<3
+openai>=1.40,<2
+scikit-learn>=1.5,<2
+numpy>=1.26,<3

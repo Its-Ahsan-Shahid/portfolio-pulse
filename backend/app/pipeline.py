@@ -1,15 +1,19 @@
 """Orchestration: fetch -> preprocess -> embed -> agents -> assemble result.
 
-Runs as a background task. Progress is reported through a callback.
+Runs synchronously inside the request (serverless-friendly): no background
+tasks, no progress callbacks, no disk persistence. Bull and Bear agents run
+in parallel threads since they are independent, keeping total latency well
+under serverless duration limits.
+
 If API keys are missing, clearly-labeled demo/heuristic paths keep the app
 usable: demo news when no news keys, heuristic agents when no LLM key.
 """
 from __future__ import annotations
 
-import json
 import os
-import random
+import uuid
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta, timezone
 
 from . import agents as agent_mod
@@ -17,7 +21,7 @@ from .agents import DISCLAIMER
 from .config import settings
 from .embeddings_store import build_store, doc_text_for
 from .news_clients import RawArticle, fetch_all
-from .preprocess import preprocess
+from .preprocess import preprocess, priority_dates_for
 
 
 # ------------------------------------------------------- demo fixture ---
@@ -112,10 +116,13 @@ def _heuristic_cases(material, company: str, query: str) -> tuple[dict, dict, di
 
 # ------------------------------------------------------------ charts ---
 
-def build_charts(relevant, material, days: int, priority_days: int) -> dict:
+def build_charts(relevant, material, days: int) -> dict:
     now = datetime.now(timezone.utc)
     today = now.date()
     from_day = today - timedelta(days=days - 1)
+
+    # Priority = the latest N distinct calendar dates with relevant news.
+    top_dates = priority_dates_for(relevant, settings.priority_days)
 
     cat_counter: Counter = Counter()
     for m in material:
@@ -141,7 +148,7 @@ def build_charts(relevant, material, days: int, priority_days: int) -> dict:
             "count": len(items),
             "avg_sentiment": avg,
             "material_count": mat_n,
-            "priority": (today - d).days < priority_days,
+            "priority": d in top_dates,
         })
         d += timedelta(days=1)
 
@@ -161,33 +168,27 @@ def build_charts(relevant, material, days: int, priority_days: int) -> dict:
 
 # --------------------------------------------------------------- main ---
 
-def run_analysis(job_id: str, ticker: str, company_name: str, query: str,
-                 days: int, progress) -> dict:
+def run_analysis(ticker: str, company_name: str, query: str, days: int) -> dict:
     s = settings
+    job_id = uuid.uuid4().hex[:12]
     ticker = ticker.upper()
     today = datetime.now(timezone.utc).date()
     from_day = today - timedelta(days=days - 1)
     demo_news = not s.live_news
 
     # ---- 1. fetch ---------------------------------------------------------
-    progress("fetching", 8, "Fetching news from configured sources…")
     if demo_news:
         articles = demo_articles(company_name, ticker, days)
         sources = ["Demo Wire (no news API keys configured)"]
     else:
         articles, sources = fetch_all(s, ticker, from_day, today)
-    progress("fetching", 28, f"Fetched {len(articles)} articles. Deduplicating…")
 
     # ---- 2. preprocess ----------------------------------------------------
-    progress("preprocessing", 38, "Running entity relevance + NER filter…")
     relevant, material = preprocess(
         articles, ticker, company_name, days, s.priority_days, s.materiality_threshold
     )
-    progress("preprocessing", 55,
-             f"{len(relevant)} relevant, {len(material)} material articles after filtering.")
 
     # ---- 3. embed ---------------------------------------------------------
-    progress("embedding", 62, "Embedding material news into vector store…")
     store, vec_backend = build_store(
         os.path.join(s.data_dir, "chroma"), f"pp-{job_id}"
     )
@@ -205,10 +206,8 @@ def run_analysis(job_id: str, ticker: str, company_name: str, query: str,
             },
         })
     store.add(docs)
-    progress("embedding", 70, f"Indexed {len(docs)} articles ({vec_backend}).")
 
     # ---- 4. agents --------------------------------------------------------
-    progress("agents", 76, "Bull agent building the upside case…")
     heuristic = not s.live_llm
     if heuristic:
         bull, bear, verdict = _heuristic_cases(material, company_name, query)
@@ -216,10 +215,12 @@ def run_analysis(job_id: str, ticker: str, company_name: str, query: str,
     else:
         base_url, api_key, mod_model, agent_model = s.llm_endpoint()
         llm = agent_mod.LLMClient(base_url, api_key, mod_model, agent_model)
-        bull = agent_mod.run_bull(llm, store, company_name, ticker, query)
-        progress("agents", 84, "Bear agent building the downside case…")
-        bear = agent_mod.run_bear(llm, store, company_name, ticker, query)
-        progress("agents", 92, "Moderator weighing both cases…")
+        # Bull and Bear are independent: run them concurrently to fit
+        # comfortably inside serverless duration limits.
+        with ThreadPoolExecutor(max_workers=2) as ex:
+            f_bull = ex.submit(agent_mod.run_bull, llm, store, company_name, ticker, query)
+            f_bear = ex.submit(agent_mod.run_bear, llm, store, company_name, ticker, query)
+            bull, bear = f_bull.result(), f_bear.result()
         verdict = agent_mod.run_moderator(
             llm, company_name, ticker, query, bull, bear, len(material), len(relevant)
         )
@@ -227,8 +228,7 @@ def run_analysis(job_id: str, ticker: str, company_name: str, query: str,
     store.close()
 
     # ---- 5. assemble ------------------------------------------------------
-    progress("finalizing", 97, "Assembling dashboard…")
-    charts = build_charts(relevant, material, days, s.priority_days)
+    charts = build_charts(relevant, material, days)
     charts["agent_scores"] = {"bull": bull["score"], "bear": bear["score"]}
 
     news_out = []
@@ -244,7 +244,7 @@ def run_analysis(job_id: str, ticker: str, company_name: str, query: str,
             "priority": m.priority,
         })
 
-    result = {
+    return {
         "job_id": job_id,
         "ticker": ticker,
         "company_name": company_name,
@@ -270,11 +270,3 @@ def run_analysis(job_id: str, ticker: str, company_name: str, query: str,
             "disclaimer": DISCLAIMER,
         },
     }
-
-    out_dir = os.path.join(s.data_dir, "results")
-    os.makedirs(out_dir, exist_ok=True)
-    with open(os.path.join(out_dir, f"{job_id}.json"), "w") as f:
-        json.dump(result, f)
-
-    progress("done", 100, "Analysis complete.")
-    return result

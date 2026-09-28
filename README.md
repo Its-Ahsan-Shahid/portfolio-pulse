@@ -43,28 +43,40 @@ With no keys at all, the app runs in clearly-labeled **demo mode**
 
 ## API
 
-- `POST /api/analyze` `{ticker, company_name, query, days}` → `{job_id}`
-- `GET /api/jobs/{job_id}` → `{status, progress, stage, message, error}`
-- `GET /api/results/{job_id}` → full analysis JSON (verdict, cases, charts, news)
-- `GET /health`, `/sitemap.xml`, `/robots.txt`
+- `POST /api/analyze` `{ticker, company_name, query, days}` → full analysis JSON
+  (verdict, bull/bear cases, charts, cited news). Runs synchronously in one
+  request — no polling, no job store.
+- `GET /health`, `/api/health`, `/sitemap.xml`, `/robots.txt`
 
-## Deploy — Hugging Face Spaces (Docker, free)
+## Deploy — Vercel (free, no credit card)
 
-1. Create a Space with the **Docker** SDK.
-2. Push this repo to the Space (`git push`).
-3. In Space **Settings → Variables and secrets**, add repository secrets:
+The app is serverless-ready: one FastAPI application served as a Vercel
+Python function (`api/index.py`), with `vercel.json` routing every path to it
+and `maxDuration: 300` so full analyses comfortably finish.
+
+1. Push this repo to GitHub, then **Import** it at https://vercel.com/new
+   (sign in with GitHub — no credit card required).
+2. In the Vercel project → **Settings → Environment Variables**, add:
    `GROQ_API_KEY`, `FINNHUB_API_KEY`, `ALPHA_VANTAGE_API_KEY`.
-4. The `Dockerfile` serves the app on port 7860 automatically.
+3. **Deploy.** The dashboard is live at `https://<project>.vercel.app`.
 
-> Cloudflare Pages can't run Python, so the full app lives in one container.
-> If you prefer Cloudflare for the frontend, serve `backend/app/static/`
-> from Pages and point it at the API container (CORS is already open).
+> Render's free tier now requires a credit card for verification, and
+> Hugging Face paywalled Docker/Gradio Spaces — the `Dockerfile.render`,
+> `render.yaml`, and `backend/requirements-render.txt` remain in the repo as
+> reference, but Vercel is the recommended free target.
+
+## Deploy — Docker (any host)
+
+`Dockerfile.render` builds the lean image (no torch/spacy/chromadb):
+`docker build -f Dockerfile.render -t portfolio-pulse .`
+Run with `-e GROQ_API_KEY=… -e FINNHUB_API_KEY=… -e ALPHA_VANTAGE_API_KEY=… -p 8000:8000`.
+Health check: `/api/health`.
 
 ## Project layout
 
 ```
 backend/app/
-  main.py             FastAPI app, jobs, SEO routes, static serving
+  main.py             FastAPI app (synchronous /api/analyze), SEO routes, static UI
   pipeline.py         orchestration + demo fixture + heuristic fallback
   news_clients.py     Finnhub + Alpha Vantage fetchers
   preprocess.py       entity relevance, financial taxonomy, materiality

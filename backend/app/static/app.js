@@ -113,25 +113,55 @@ function renderPipeline(job) {
   });
 }
 
-/* ---------- Polling with backoff ---------- */
-let pollTimer = null;
-let failCount = 0;
+/* ---------- Analysis (single synchronous request) ---------- */
+let stageTimers = [];
 
-function stopPoll() {
-  if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
+function stopStages() {
+  stageTimers.forEach(t => clearTimeout(t));
+  stageTimers = [];
 }
 
-function startAnalysis(payload) {
-  stopPoll();
+// The backend runs the whole pipeline in one request (serverless-friendly),
+// so the UI walks through staged progress messages while awaiting the result.
+const STAGE_MESSAGES = [
+  [0, 'Fetching news from configured sources…'],
+  [9000, 'Deduplicating and filtering for entity relevance…'],
+  [20000, 'Scoring financial materiality…'],
+  [32000, 'Bull agent building the upside case…'],
+  [55000, 'Bear agent building the downside case…'],
+  [85000, 'Moderator weighing both cases…'],
+  [120000, 'Assembling your dashboard…'],
+];
+
+function playStages() {
+  stopStages();
+  const stepCount = STEPS.length;
+  STAGE_MESSAGES.forEach(([delay, message], idx) => {
+    stageTimers.push(setTimeout(() => {
+      renderPipeline({ status: 'working', progress: Math.min(8 + idx * 13, 94), message });
+      const active = Math.min(idx + 1, stepCount - 1);
+      STEPS.forEach((_, i) => {
+        const li = $('#step-' + i);
+        li.classList.toggle('done', i < active);
+        li.classList.toggle('active', i === active);
+        const dot = li.querySelector('.step-dot');
+        dot.textContent = i < active ? '✓' : String(i + 1);
+      });
+    }, delay));
+  });
+}
+
+async function startAnalysis(payload) {
+  stopStages();
   destroyCharts();
-  failCount = 0;
 
   $('#dashboard').hidden = true;
   $('#error-card').hidden = true;
   $('#pipeline').hidden = false;
   $('#news-list').innerHTML = '';
   initSteps();
-  renderPipeline({ status: 'queued', progress: 0, message: 'Queued…' });
+  renderPipeline({ status: 'queued', progress: 4, message: 'Starting analysis…' });
+  playStages();
 
   const btn = $('#run-btn');
   btn.disabled = true;
@@ -139,62 +169,36 @@ function startAnalysis(payload) {
 
   $('#pipeline').scrollIntoView({ behavior: 'smooth', block: 'start' });
 
-  fetch('/api/analyze', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-  })
-    .then(r => {
-      if (!r.ok) throw new Error('Server returned ' + r.status);
-      return r.json();
-    })
-    .then(data => {
-      if (!data.job_id) throw new Error('No job id returned');
-      pollJob(data.job_id);
-    })
-    .catch(err => {
-      resetRunButton();
-      showError('Could not start the analysis: ' + err.message);
+  try {
+    const r = await fetch('/api/analyze', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
     });
+    if (!r.ok) {
+      let detail = 'Server returned ' + r.status;
+      try { detail = (await r.json()).detail || detail; } catch (_) {}
+      throw new Error(detail);
+    }
+    const data = await r.json();
+    stopStages();
+    resetRunButton();
+    renderResults(data);
+    $('#pipeline').hidden = true;
+    $('#dashboard').hidden = false;
+    $('#dashboard').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    observeReveals();
+  } catch (err) {
+    stopStages();
+    resetRunButton();
+    showError('The analysis could not be completed: ' + err.message);
+  }
 }
 
 function resetRunButton() {
   const btn = $('#run-btn');
   btn.disabled = false;
   btn.querySelector('span').textContent = 'Run Analysis';
-}
-
-function pollJob(jobId) {
-  fetch('/api/jobs/' + encodeURIComponent(jobId))
-    .then(r => {
-      if (!r.ok) throw new Error('HTTP ' + r.status);
-      return r.json();
-    })
-    .then(job => {
-      failCount = 0;
-      renderPipeline(job);
-      if (job.status === 'done') {
-        stopPoll();
-        loadResults(jobId);
-      } else if (job.status === 'error') {
-        stopPoll();
-        resetRunButton();
-        showError(job.error || job.message || 'The analysis failed unexpectedly.');
-      } else {
-        pollTimer = setTimeout(() => pollJob(jobId), 2000);
-      }
-    })
-    .catch(() => {
-      failCount += 1;
-      if (failCount > 8) {
-        stopPoll();
-        resetRunButton();
-        showError('Lost connection to the analysis backend. Please check your connection and try again.');
-        return;
-      }
-      const backoff = Math.min(2000 * Math.pow(1.5, failCount), 15000);
-      pollTimer = setTimeout(() => pollJob(jobId), backoff);
-    });
 }
 
 function showError(msg) {
@@ -207,25 +211,6 @@ function showError(msg) {
 }
 
 /* ---------- Results ---------- */
-function loadResults(jobId) {
-  fetch('/api/results/' + encodeURIComponent(jobId))
-    .then(r => {
-      if (!r.ok) throw new Error('HTTP ' + r.status);
-      return r.json();
-    })
-    .then(data => {
-      resetRunButton();
-      renderResults(data);
-      $('#pipeline').hidden = true;
-      $('#dashboard').hidden = false;
-      $('#dashboard').scrollIntoView({ behavior: 'smooth', block: 'start' });
-      observeReveals();
-    })
-    .catch(err => {
-      resetRunButton();
-      showError('Analysis finished, but results could not be loaded: ' + err.message);
-    });
-}
 
 function renderResults(d) {
   renderStats(d);
